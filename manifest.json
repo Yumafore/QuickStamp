@@ -1,10 +1,9 @@
 {
   "id": "quickstamp",
   "name": "QuickStamp",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "minAppVersion": "0.15.0",
-  "description": "一键将时间戳或 Templater 模板插入今日日记：支持文章末尾、按标题定位、按文本定位，未匹配标题时自动创建，回车自动插入。",
+  "description": "一键将时间戳或 Templater 模板插入今日日记：支持文章末尾、按标题定位、按文本定位，可自动跳过含 <>[] 的特殊行。",
   "author": "Your Name",
-  "authorUrl": "",
   "isDesktopOnly": false
 }
