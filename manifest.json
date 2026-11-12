@@ -1,9 +1,10 @@
 {
   "id": "quickstamp",
   "name": "QuickStamp",
-  "version": "1.4.0",
+  "version": "1.6.0",
   "minAppVersion": "0.15.0",
-  "description": "快捷键插入时间戳 / Templater 模板到今日日记，支持按标题定位、回车自动插入。",
-  "author": "Your Name",
+  "description": "一键将时间戳或 Templater 模板插入今日日记：支持按标题层级与标题名定位、未匹配时自动创建标题、回车自动插入时间戳。",
+  "author": "提狐灌饼",
+  "authorUrl": "",
   "isDesktopOnly": false
 }
