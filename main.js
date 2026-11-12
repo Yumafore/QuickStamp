@@ -37,7 +37,7 @@ class AutoTimestampPlugin extends Plugin {
 
         this.addRibbonIcon('clock', '插入时间戳 / 模板', () => {
             this.handleInsert().catch((err) => {
-                console.error('[Auto Timestamp]', err);
+                console.error('[QuickStamp]', err);
                 new Notice('插入失败，详见控制台');
             });
         });
@@ -48,7 +48,7 @@ class AutoTimestampPlugin extends Plugin {
             icon: 'clock',
             callback: () => {
                 this.handleInsert().catch((err) => {
-                    console.error('[Auto Timestamp] handleInsert 失败:', err);
+                    console.error('[QuickStamp] handleInsert 失败:', err);
                     new Notice('插入失败，详见控制台');
                 });
             },
@@ -110,7 +110,7 @@ class AutoTimestampPlugin extends Plugin {
                         needSwitch = !current || current.path !== targetFile.path;
                     }
                 } catch (err) {
-                    console.error('[Auto Timestamp] 打开今日日记失败:', err);
+                    console.error('[QuickStamp] 打开今日日记失败:', err);
                     new Notice('打开今日日记失败，仅在当前笔记操作');
                 }
             }
@@ -242,7 +242,7 @@ class AutoTimestampPlugin extends Plugin {
                 if (v) v.editor.focus();
             }, 100);
         } catch (err) {
-            console.error('[Auto Timestamp] 插入模板失败:', err);
+            console.error('[QuickStamp] 插入模板失败:', err);
             new Notice('插入模板失败，详见控制台');
         }
     }
@@ -258,7 +258,7 @@ class AutoTimestampPlugin extends Plugin {
             });
             return typeof result === 'string' ? result : null;
         } catch (e) {
-            console.warn('[Auto Timestamp] renderTemplateContent 失败:', e);
+            console.warn('[QuickStamp] renderTemplateContent 失败:', e);
             return null;
         }
     }
@@ -292,7 +292,7 @@ class AutoTimestampSettingTab extends PluginSettingTab {
     display() {
         const { containerEl } = this;
         containerEl.empty();
-        containerEl.createEl('h2', { text: 'Auto Timestamp 设置' });
+        containerEl.createEl('h2', { text: 'QuickStamp 设置' });
 
         new Setting(containerEl)
             .setName('当前不是今日日记时，先打开今日日记')
