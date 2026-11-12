@@ -18,10 +18,11 @@ const DEFAULT_SETTINGS = {
     textDirection: 'after',
     autoTimestampOnEnter: false,
     autoCreateHeading: true,
+    skipSpecialLines: true,      // 新增：跳过包含 <>[] 的相邻行
 };
 
 const TS_PREFIX = '- ';
-const TS_SUFFIX = '\n    ';   // 时间戳后换行 + 4 个空格（一个缩进）
+const TS_SUFFIX = '\n    ';
 
 class QuickStampPlugin extends Plugin {
     async onload() {
@@ -56,7 +57,6 @@ class QuickStampPlugin extends Plugin {
         });
     }
 
-    // ---------- 回车自动插入（固定光标处） ----------
     handleEnterKey(evt) {
         if (!this.settings.autoTimestampOnEnter) return;
         const isEnter = evt.key === 'Enter' || evt.keyCode === 13;
@@ -91,7 +91,6 @@ class QuickStampPlugin extends Plugin {
         return `${TS_PREFIX}${ts}${TS_SUFFIX}`;
     }
 
-    // ---------- 主流程 ----------
     async handleInsert() {
         if (this.settings.switchToDailyNote) {
             await this.openTodayDailyNote();
@@ -186,21 +185,20 @@ class QuickStampPlugin extends Plugin {
         } catch (_) { /* 忽略 */ }
     }
 
-    // ---------- 统一插入逻辑（时间戳与模板共用） ----------
     insertTextSmart(view, text) {
         const editor = view.editor;
 
         const rawPosition = this.settings.insertPosition;
         const position = ['heading', 'end', 'text'].includes(rawPosition) ? rawPosition : 'end';
 
-        // ===== 标题模式 =====
         if (position === 'heading') {
             const levelNum = this.normalizeLevel(this.settings.headingLevel);
             const direction = this.settings.headingDirection === 'before' ? 'before' : 'after';
             const needle = (this.settings.headingText || '').trim();
 
             console.log(
-                `[QuickStamp] 插入 → 位置=heading, 层级=H${levelNum}, 方向=${direction}, 标题名="${needle || '(留空)'}", 自动创建=${this.settings.autoCreateHeading}`
+                `[QuickStamp] 插入 → 位置=heading, 层级=H${levelNum}, 方向=${direction}, 标题名="${needle || '(留空)'}", ` +
+                `自动创建=${this.settings.autoCreateHeading}, 跳过特殊行=${this.settings.skipSpecialLines}`
             );
 
             const targetLine = this.findTargetHeadingLine(editor, levelNum, needle);
@@ -211,32 +209,18 @@ class QuickStampPlugin extends Plugin {
             }
 
             if (this.settings.autoCreateHeading && needle) {
-                console.log(
-                    `[QuickStamp] 未找到标题，在文档末尾创建 H${levelNum} "${needle}"（方向=${direction}）并插入内容`
-                );
                 this.appendHeadingAndInsert(editor, levelNum, needle, text, direction);
                 this.finishInsert(view);
                 return;
             }
 
             const available = this.listHeadings(editor, levelNum);
-            let hint;
-            if (available.length === 0) {
-                hint = `文档中没有 H${levelNum} 标题（注意 Markdown 标题需 # 后跟空格，例如「## 标题」）`;
-            } else {
-                const sample = available
-                    .slice(0, 8)
-                    .map((h) => `第${h.line + 1}行「${h.title}」`)
-                    .join('、');
-                const more = available.length > 8 ? ` 等 ${available.length} 个` : '';
-                hint = `文档中 H${levelNum} 标题有：${sample}${more}`;
-            }
             const reason = !this.settings.autoCreateHeading
                 ? '「未找到标题时自动创建」开关已关闭'
                 : '「标题名」留空，无法命名新标题';
             console.warn(
-                `[QuickStamp] ❌ 未找到匹配标题（层级 H${levelNum}，标题名含「${needle || '(留空则任意)'}」）。${reason}。${hint}。已回退到文章末尾插入。`,
-                available
+                `[QuickStamp] ❌ 未找到匹配标题（H${levelNum}「${needle || '*' }」）。${reason}。` +
+                `可选标题：`, available
             );
 
             this.insertAtEnd(editor, text);
@@ -244,7 +228,6 @@ class QuickStampPlugin extends Plugin {
             return;
         }
 
-        // ===== 文本模式 =====
         if (position === 'text') {
             const targetText = (this.settings.targetText || '').trim();
             const direction = this.settings.textDirection === 'before' ? 'before' : 'after';
@@ -256,10 +239,6 @@ class QuickStampPlugin extends Plugin {
                 return;
             }
 
-            console.log(
-                `[QuickStamp] 插入 → 位置=text, 目标文本="${targetText}", 方向=${direction}`
-            );
-
             const targetLine = this.findTargetTextLine(editor, targetText);
             if (targetLine !== -1) {
                 this.insertAtHeading(editor, targetLine, direction, text);
@@ -267,17 +246,19 @@ class QuickStampPlugin extends Plugin {
                 return;
             }
 
-            console.warn(
-                `[QuickStamp] ❌ 未找到包含「${targetText}」的行，已回退到文章末尾插入。`
-            );
+            console.warn(`[QuickStamp] ❌ 未找到包含「${targetText}」的行，已回退到文章末尾插入。`);
             this.insertAtEnd(editor, text);
             this.finishInsert(view);
             return;
         }
 
-        // ===== 末尾模式 =====
         this.insertAtEnd(editor, text);
         this.finishInsert(view);
+    }
+
+    /** 判断某行是否为"特殊行"（包含 <>[] 任一字符） */
+    isSpecialLine(lineText) {
+        return /[<>\[\]]/.test(lineText);
     }
 
     appendHeadingAndInsert(editor, level, headingText, text, direction) {
@@ -314,32 +295,53 @@ class QuickStampPlugin extends Plugin {
         editor.setCursor({ line: cursorLine, ch: lastCh });
     }
 
+    /**
+     * 在指定标题附近插入，支持跳过相邻的特殊行（含 <>[] 的行）。
+     * - before：向上跳过连续特殊行，插入到最上面的特殊行之前
+     * - after ：向下跳过连续特殊行，插入到最下面的特殊行之后
+     * - 若跳过特殊行后到达文档首/尾，则插入到文档边界
+     */
     insertAtHeading(editor, targetLine, direction, text) {
         const lines = text.split('\n');
         const lastCh = lines[lines.length - 1].length;
+        const skipSpecial = this.settings.skipSpecialLines;
+        const lineCount = editor.lineCount();
 
         if (direction === 'before') {
-            editor.replaceRange(text + '\n', { line: targetLine, ch: 0 });
+            let insertLine = targetLine;
+            if (skipSpecial) {
+                while (insertLine > 0 && this.isSpecialLine(editor.getLine(insertLine - 1))) {
+                    insertLine--;
+                }
+            }
+            editor.replaceRange(text + '\n', { line: insertLine, ch: 0 });
             editor.setCursor({
-                line: targetLine + lines.length - 1,
+                line: insertLine + lines.length - 1,
                 ch: lastCh,
             });
             return;
         }
 
-        // after
-        const lineCount = editor.lineCount();
-        if (targetLine + 1 >= lineCount) {
-            const lastLineText = editor.getLine(targetLine);
-            editor.replaceRange('\n' + text, { line: targetLine, ch: lastLineText.length });
+        // after 方向
+        let insertLine = targetLine + 1;
+        if (skipSpecial) {
+            while (insertLine < lineCount && this.isSpecialLine(editor.getLine(insertLine))) {
+                insertLine++;
+            }
+        }
+
+        if (insertLine >= lineCount) {
+            // 跳过特殊行后到达文档末尾 → 追加到末尾
+            const lastLineText = editor.getLine(lineCount - 1);
+            editor.replaceRange('\n' + text, { line: lineCount - 1, ch: lastLineText.length });
             editor.setCursor({
-                line: targetLine + lines.length,
+                line: lineCount - 1 + lines.length,
                 ch: lastCh,
             });
         } else {
-            editor.replaceRange(text + '\n', { line: targetLine + 1, ch: 0 });
+            editor.replaceRange(text + '\n', { line: insertLine, ch: 0 });
             editor.setCursor({
-                line: targetLine + lines.length,
+                line: insertLine + lines.length - 1,
                 ch: lastCh,
             });
         }
@@ -375,12 +377,6 @@ class QuickStampPlugin extends Plugin {
         return n;
     }
 
-    // ============ 性能优化：一次性扫描全文 ============
-
-    /**
-     * 一次 getValue + split，扫描所有标题。
-     * 替代原先逐行 getLine 的 O(n) 次调用。
-     */
     listHeadings(editor, level) {
         const levelNum = this.normalizeLevel(level);
         const lines = editor.getValue().split('\n');
@@ -406,24 +402,16 @@ class QuickStampPlugin extends Plugin {
         return -1;
     }
 
-    /**
-     * 一次 getValue + lastIndexOf，替代逐行 getLine。
-     * lastIndexOf 是原生实现，极快；行号用 charCodeAt 计数，单次 O(n)。
-     */
     findTargetTextLine(editor, needle) {
         const content = editor.getValue();
         const idx = content.lastIndexOf(needle);
         if (idx === -1) return -1;
 
-        // 计算 needle 所在行号：数 idx 之前的 '\n' 个数
-        // 用 charCodeAt（10 = '\n'），避免 split 创建大数组
         let line = 0;
         for (let i = 0; i < idx; i++) {
             if (content.charCodeAt(i) === 10) line++;
         }
-
-        const lineText = content.slice(idx, content.indexOf('\n', idx) === -1 ? content.length : content.indexOf('\n', idx));
-        console.log(`[QuickStamp] ✅ 匹配文本：第 ${line + 1} 行「${lineText.trim()}」`);
+        console.log(`[QuickStamp] ✅ 匹配文本：第 ${line + 1} 行`);
         return line;
     }
 
@@ -431,7 +419,6 @@ class QuickStampPlugin extends Plugin {
         try { editor.focus(); } catch (_) {}
     }
 
-    // ---------- 模板插入（遵循插入位置设置） ----------
     async insertTemplate() {
         const tp = this.getTemplater();
         const fallback = () => {
@@ -483,7 +470,7 @@ class QuickStampPlugin extends Plugin {
 
         try {
             const content = await this.app.vault.read(templateFile);
-            console.warn('[QuickStamp] 模板未渲染，直接使用原文（Templater 语法不会被解析）');
+            console.warn('[QuickStamp] 模板未渲染，直接使用原文');
             return content;
         } catch (e) {
             console.warn('[QuickStamp] 读取模板文件失败:', e);
@@ -515,7 +502,7 @@ class QuickStampPlugin extends Plugin {
             `[QuickStamp] 启动设置：位置=${this.settings.insertPosition}, 层级=H${this.settings.headingLevel}, ` +
             `标题方向=${this.settings.headingDirection}, 标题名="${this.settings.headingText || ''}", ` +
             `目标文本="${this.settings.targetText || ''}", 文本方向=${this.settings.textDirection}, ` +
-            `自动创建=${this.settings.autoCreateHeading}`
+            `自动创建=${this.settings.autoCreateHeading}, 跳过特殊行=${this.settings.skipSpecialLines}`
         );
     }
     async saveSettings() {
@@ -523,7 +510,6 @@ class QuickStampPlugin extends Plugin {
     }
 }
 
-// ---------- 设置面板 ----------
 class QuickStampSettingTab extends PluginSettingTab {
     constructor(app, plugin) { super(app, plugin); this.plugin = plugin; }
 
@@ -562,7 +548,7 @@ class QuickStampSettingTab extends PluginSettingTab {
         } else {
             new Setting(containerEl)
                 .setName('时间戳格式')
-                .setDesc('moment.js 格式。例：HH:mm:ss（24 小时制）、hh:mm:ss A（12 小时制）。插入的最终文本为 "- <时间戳>" 后接换行和 4 个空格缩进，光标落在缩进末尾。')
+                .setDesc('moment.js 格式。例：HH:mm:ss（24 小时制）、hh:mm:ss A（12 小时制）。')
                 .addText((text) => text
                     .setPlaceholder('HH:mm:ss')
                     .setValue(this.plugin.settings.timestampFormat)
@@ -574,7 +560,7 @@ class QuickStampSettingTab extends PluginSettingTab {
 
         new Setting(containerEl)
             .setName('回车时自动插入时间戳')
-            .setDesc('开启后，在 Markdown 编辑器按 Enter 会在新行插入 "- HH:mm:ss"（其后跟换行和 4 空格缩进）。回车插入始终发生在光标处，不受"插入位置"设置影响。')
+            .setDesc('开启后，在 Markdown 编辑器按 Enter 会在新行插入 "- HH:mm:ss"。回车插入始终发生在光标处。')
             .addToggle((t) => t.setValue(this.plugin.settings.autoTimestampOnEnter).onChange(async (v) => {
                 this.plugin.settings.autoTimestampOnEnter = v;
                 await this.plugin.saveSettings();
@@ -582,7 +568,7 @@ class QuickStampSettingTab extends PluginSettingTab {
 
         new Setting(containerEl)
             .setName('插入位置')
-            .setDesc('对时间戳和模板都生效。可插入到文章末尾、指定标题附近，或指定文本附近。')
+            .setDesc('对时间戳和模板都生效。')
             .addDropdown((dd) => dd
                 .addOption('end', '文章最后一行')
                 .addOption('heading', '指定标题')
@@ -594,7 +580,6 @@ class QuickStampSettingTab extends PluginSettingTab {
                     this.display();
                 }));
 
-        // ===== 标题模式设置 =====
         if (this.plugin.settings.insertPosition === 'heading') {
             new Setting(containerEl)
                 .setName('标题层级')
@@ -610,7 +595,7 @@ class QuickStampSettingTab extends PluginSettingTab {
 
             new Setting(containerEl)
                 .setName('标题名（可选）')
-                .setDesc('留空则匹配文中最后一个该层级标题；填写则只匹配"标题名包含该文本"的标题（如填 "任务" 可匹配 "今日任务"）。')
+                .setDesc('留空则匹配文中最后一个该层级标题；填写则匹配标题名包含该文本的标题。')
                 .addText((text) => text
                     .setPlaceholder('例如：任务')
                     .setValue(this.plugin.settings.headingText)
@@ -632,18 +617,25 @@ class QuickStampSettingTab extends PluginSettingTab {
 
             new Setting(containerEl)
                 .setName('未找到标题时自动创建')
-                .setDesc('仅在"标题名"非空时生效。开启后，若文档中不存在匹配标题，会在文档末尾新建 `## 标题名`，并按"插入方向"把内容插在其之前或之后。关闭后回退到文章末尾插入内容。')
+                .setDesc('仅在"标题名"非空时生效。若文档中不存在匹配标题，会在文档末尾新建该标题并按方向插入内容。')
                 .addToggle((t) => t.setValue(this.plugin.settings.autoCreateHeading).onChange(async (v) => {
                     this.plugin.settings.autoCreateHeading = v;
                     await this.plugin.saveSettings();
                 }));
+
+            new Setting(containerEl)
+                .setName('跳过特殊行（<>[]）')
+                .setDesc('开启后，插入时若紧邻标题的相邻行包含 `<`、`>`、`[`、`]` 中任一字符（如 Templater 语法 `<% %>`、wiki 链接 `[[ ]]`、待办框 `[ ]` 等），会自动跳过连续的特殊行再插入。关闭后紧贴标题插入。')
+                .addToggle((t) => t.setValue(this.plugin.settings.skipSpecialLines).onChange(async (v) => {
+                    this.plugin.settings.skipSpecialLines = v;
+                    await this.plugin.saveSettings();
+                }));
         }
 
-        // ===== 文本模式设置 =====
         if (this.plugin.settings.insertPosition === 'text') {
             new Setting(containerEl)
                 .setName('目标文本')
-                .setDesc('测试功能谨慎使用：要匹配的文本片段（区分大小写）。会从文末向上查找**最后一个包含该文本的行**作为锚点。使用全文一次性扫描，长文档也很快。')
+                .setDesc('要匹配的文本片段（区分大小写）。从文末向上查找最后一个包含该文本的行。')
                 .addText((text) => text
                     .setPlaceholder('例如：今日总结')
                     .setValue(this.plugin.settings.targetText)
@@ -663,7 +655,7 @@ class QuickStampSettingTab extends PluginSettingTab {
                         await this.plugin.saveSettings();
                     }));
 
-            const hint = containerEl.createEl('p', { text: '提示：找不到目标文本时，内容会插入到文章末尾。可在控制台查看匹配日志。' });
+            const hint = containerEl.createEl('p', { text: '提示：找不到目标文本时，内容会插入到文章末尾。' });
             hint.style.cssText = 'color: var(--text-muted); font-size: 12px; margin-top: -8px;';
         }
     }
