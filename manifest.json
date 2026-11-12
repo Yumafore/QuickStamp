@@ -1,9 +1,9 @@
 {
-  "id": "auto-timestamp",
-  "name": "Auto Timestamp",
-  "version": "1.3.0",
+  "id": "quickstamp",
+  "name": "QuickStamp",
+  "version": "1.4.0",
   "minAppVersion": "0.15.0",
-  "description": "快捷键向今日日记（或当前笔记）插入时间戳或 Templater 模板。",
+  "description": "快捷键插入时间戳 / Templater 模板到今日日记，支持按标题定位、回车自动插入。",
   "author": "Your Name",
   "isDesktopOnly": false
 }
