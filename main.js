@@ -10,7 +10,6 @@ const DEFAULT_SETTINGS = {
     useTemplate: false,
     templatePath: '',
     timestampFormat: 'HH:mm:ss',
-    lockTimestamp: false,
     insertPosition: 'end',      // 'end' | 'heading'
     headingLevel: 2,            // 1-6
     headingText: '',            // 标题名（可选，包含匹配）
@@ -21,13 +20,13 @@ const DEFAULT_SETTINGS = {
 const TS_PREFIX = '- ';
 const TS_SUFFIX = ' ';
 
-class AutoTimestampPlugin extends Plugin {
+class QuickStampPlugin extends Plugin {
     async onload() {
-        globalThis.__autoTimestampPlugin = this;
+        globalThis.__quickstampPlugin = this;
         await this.loadSettings();
-        this.addSettingTab(new AutoTimestampSettingTab(this.app, this));
+        this.addSettingTab(new QuickStampSettingTab(this.app, this));
 
-        // 回车自动插入：document 捕获阶段监听，抢在 CM6 / Obsidian 之前
+        // 回车自动插入
         this.registerDomEvent(
             document,
             'keydown',
@@ -35,7 +34,7 @@ class AutoTimestampPlugin extends Plugin {
             true
         );
 
-        this.addRibbonIcon('clock', '插入时间戳 / 模板', () => {
+        this.addRibbonIcon('clock', 'QuickStamp：插入时间戳 / 模板', () => {
             this.handleInsert().catch((err) => {
                 console.error('[QuickStamp]', err);
                 new Notice('插入失败，详见控制台');
@@ -44,7 +43,7 @@ class AutoTimestampPlugin extends Plugin {
 
         this.addCommand({
             id: 'insert-timestamp',
-            name: '插入时间戳 / 模板（今日日记）',
+            name: 'QuickStamp：插入时间戳 / 模板',
             icon: 'clock',
             callback: () => {
                 this.handleInsert().catch((err) => {
@@ -58,10 +57,8 @@ class AutoTimestampPlugin extends Plugin {
     // ---------- 回车自动插入 ----------
     handleEnterKey(evt) {
         if (!this.settings.autoTimestampOnEnter) return;
-
         const isEnter = evt.key === 'Enter' || evt.keyCode === 13;
         if (!isEnter) return;
-
         if (evt.shiftKey || evt.ctrlKey || evt.metaKey || evt.altKey) return;
         if (evt.isComposing) return;
 
@@ -79,13 +76,12 @@ class AutoTimestampPlugin extends Plugin {
         const cursor = editor.getCursor();
 
         editor.replaceRange('\n' + ts, cursor);
-
         const lines = ts.split('\n');
         editor.setCursor({
             line: cursor.line + lines.length,
             ch: lines[lines.length - 1].length,
         });
-        editor.focus();
+        this.focusEditor(editor);
     }
 
     buildTimestampText() {
@@ -93,33 +89,10 @@ class AutoTimestampPlugin extends Plugin {
         return `${TS_PREFIX}${ts}${TS_SUFFIX}`;
     }
 
-    // ---------- 按钮/命令触发 ----------
+    // ---------- 核心流程 ----------
     async handleInsert() {
-        let targetFile = null;
-        let needSwitch = false;
-
         if (this.settings.switchToDailyNote) {
-            const daily = this.getDailyNotes();
-            if (!daily) {
-                new Notice('未启用日记核心插件，仅在当前笔记操作');
-            } else {
-                try {
-                    targetFile = await daily.createDailyNote(moment());
-                    if (targetFile) {
-                        const current = this.app.workspace.getActiveFile();
-                        needSwitch = !current || current.path !== targetFile.path;
-                    }
-                } catch (err) {
-                    console.error('[QuickStamp] 打开今日日记失败:', err);
-                    new Notice('打开今日日记失败，仅在当前笔记操作');
-                }
-            }
-        }
-
-        if (needSwitch && targetFile) {
-            const leaf = this.app.workspace.getLeaf(false);
-            await leaf.openFile(targetFile);
-            await new Promise((r) => setTimeout(r, 150));
+            await this.openTodayDailyNote();
         }
 
         if (this.settings.useTemplate) {
@@ -127,15 +100,94 @@ class AutoTimestampPlugin extends Plugin {
         } else {
             const view = this.app.workspace.getActiveViewOfType(MarkdownView);
             if (view) {
-                this.insertTextSmart(view.editor, this.buildTimestampText());
+                this.insertTextSmart(view, this.buildTimestampText());
             } else {
                 new Notice('当前没有打开的 Markdown 笔记');
             }
         }
     }
 
-    // ---------- 按设置位置插入 ----------
-    insertTextSmart(editor, text) {
+    async openTodayDailyNote() {
+        const dailyPlugin = this.app.internalPlugins?.getPluginById?.('daily-notes');
+        if (!dailyPlugin?.enabled) {
+            new Notice('未启用“日记”核心插件，仅在当前笔记操作');
+            return false;
+        }
+
+        const beforeFile = this.app.workspace.getActiveFile();
+
+        try {
+            await this.app.commands.executeCommandById('daily-notes');
+        } catch (err) {
+            console.error('[QuickStamp] 执行 daily-notes 命令失败:', err);
+            new Notice('打开今日日记失败，详见控制台');
+            return false;
+        }
+
+        const afterFile = await this.waitForDailyNoteSwitch(beforeFile, 5, 200);
+        if (!afterFile) {
+            return !!this.app.workspace.getActiveViewOfType(MarkdownView);
+        }
+
+        this.warnIfTemplaterConflict(afterFile);
+        return true;
+    }
+
+    async waitForDailyNoteSwitch(beforeFile, maxRetries, intervalMs) {
+        for (let i = 0; i < maxRetries; i++) {
+            await new Promise((r) => setTimeout(r, intervalMs));
+            const current = this.app.workspace.getActiveFile();
+            if (!current) continue;
+
+            if (!beforeFile || current.path !== beforeFile.path) {
+                if (this.isTodayDailyNote(current)) return current;
+                return current;
+            }
+
+            if (this.isTodayDailyNote(current)) return current;
+        }
+        return null;
+    }
+
+    isTodayDailyNote(file) {
+        if (!file) return false;
+        try {
+            const daily = this.app.internalPlugins?.getPluginById?.('daily-notes');
+            if (!daily?.instance) return false;
+            const format = daily.instance.getFormat
+                ? daily.instance.getFormat()
+                : daily.instance.options?.format || 'YYYY-MM-DD';
+            const expectedName = moment().format(format);
+            const basename = file.basename;
+            return basename === expectedName || basename.includes(expectedName);
+        } catch (_) {
+            return false;
+        }
+    }
+
+    warnIfTemplaterConflict(dailyFile) {
+        try {
+            const tp = this.app.plugins?.plugins?.['templater-obsidian'];
+            if (!tp) return;
+            const tpSettings = tp.settings;
+            if (!tpSettings?.trigger_on_file_creation) return;
+
+            const daily = this.app.internalPlugins?.getPluginById?.('daily-notes');
+            const dailyTemplate = daily?.instance?.options?.template;
+            if (dailyTemplate) {
+                console.warn(
+                    '[QuickStamp] 检测到 Templater 的“新文件创建时触发”已开启，' +
+                    '同时 Daily Notes 也配置了模板，可能导致日记内容重复处理或异常。' +
+                    '建议在 Templater 中关闭该选项，或调整 Folder Templates 避免覆盖日记文件夹。'
+                );
+            }
+        } catch (_) { /* 忽略 */ }
+    }
+
+    // ---------- 时间戳插入（遵循插入位置设置） ----------
+    insertTextSmart(view, text) {
+        const editor = view.editor;
+
         if (this.settings.insertPosition === 'heading') {
             const targetLine = this.findTargetHeadingLine(
                 editor,
@@ -146,13 +198,14 @@ class AutoTimestampPlugin extends Plugin {
                 const insertLine = this.settings.headingDirection === 'before'
                     ? targetLine
                     : targetLine + 1;
+                // text + '\n' → text 独占一行，原行内容被推到下一行
                 editor.replaceRange(text + '\n', { line: insertLine, ch: 0 });
                 const lines = text.split('\n');
                 editor.setCursor({
                     line: insertLine + lines.length - 1,
                     ch: lines[lines.length - 1].length,
                 });
-                this.finishInsert(editor);
+                this.finishInsert(view);
                 return;
             }
             const label = this.settings.headingText
@@ -161,7 +214,7 @@ class AutoTimestampPlugin extends Plugin {
             new Notice(`未找到标题 ${label}，回退到末尾插入`);
         }
         this.insertAtEnd(editor, text);
-        this.finishInsert(editor);
+        this.finishInsert(view);
     }
 
     insertAtEnd(editor, text) {
@@ -169,12 +222,14 @@ class AutoTimestampPlugin extends Plugin {
         const lastLineText = editor.getLine(lastLine);
         const lines = text.split('\n');
         if (lastLineText.trim() === '') {
+            // 末行已是空行：该空行即为"新行"，直接放入
             editor.replaceRange(text, { line: lastLine, ch: 0 });
             editor.setCursor({
                 line: lastLine + lines.length - 1,
                 ch: lines[lines.length - 1].length,
             });
         } else {
+            // 末行有内容：先换行，再放内容，保证另起一行
             editor.replaceRange('\n' + text, { line: lastLine, ch: lastLineText.length });
             editor.setCursor({
                 line: lastLine + lines.length,
@@ -183,13 +238,9 @@ class AutoTimestampPlugin extends Plugin {
         }
     }
 
-    finishInsert(editor) {
-        if (this.settings.lockTimestamp) {
-            const cur = editor.getCursor();
-            const lineText = editor.getLine(cur.line);
-            editor.setCursor({ line: cur.line, ch: lineText.length });
-        }
-        editor.focus();
+    finishInsert(view) {
+        const editor = view.editor;
+        this.focusEditor(editor);
     }
 
     findTargetHeadingLine(editor, level, text) {
@@ -208,12 +259,17 @@ class AutoTimestampPlugin extends Plugin {
         return -1;
     }
 
-    // ---------- 模板插入 ----------
+    // ---------- 焦点 ----------
+    focusEditor(editor) {
+        try { editor.focus(); } catch (_) {}
+    }
+
+    // ---------- 模板插入（强制在末尾，且另起一行） ----------
     async insertTemplate() {
         const tp = this.getTemplater();
         const fallback = () => {
             const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-            if (view) this.insertTextSmart(view.editor, this.buildTimestampText());
+            if (view) this.insertTextSmart(view, this.buildTimestampText());
         };
 
         if (!tp) { new Notice('未启用 Templater，改为插入时间戳'); fallback(); return; }
@@ -229,17 +285,27 @@ class AutoTimestampPlugin extends Plugin {
         if (!view) { new Notice('当前没有打开的 Markdown 笔记'); return; }
         const editor = view.editor;
 
+        // 优先路径：手动渲染后走 insertAtEnd，保证"另起一行"
         const rendered = await this.renderTemplateContent(file);
         if (typeof rendered === 'string') {
-            this.insertTextSmart(editor, rendered);
+            this.insertAtEnd(editor, rendered);
+            this.finishInsert(view);
             return;
         }
 
+        // 回退路径：先确保末尾有换行，再用 Templater 原生追加
         try {
+            const lastLine = editor.lineCount() - 1;
+            const lastLineText = editor.getLine(lastLine);
+            if (lastLineText.trim() !== '') {
+                // 末行有内容，先插入换行，让模板内容另起一行
+                editor.replaceRange('\n', { line: lastLine, ch: lastLineText.length });
+            }
+
             await tp.append_template_to_active_file(file);
             setTimeout(() => {
                 const v = this.app.workspace.getActiveViewOfType(MarkdownView);
-                if (v) v.editor.focus();
+                if (v) this.focusEditor(v.editor);
             }, 100);
         } catch (err) {
             console.error('[QuickStamp] 插入模板失败:', err);
@@ -263,14 +329,6 @@ class AutoTimestampPlugin extends Plugin {
         }
     }
 
-    // ---------- 外部插件访问 ----------
-    getDailyNotes() {
-        try {
-            const p = this.app.internalPlugins?.getPluginById?.('daily-notes');
-            return p?.enabled ? p.instance : null;
-        } catch (_) { return null; }
-    }
-
     getTemplater() {
         try {
             return this.app.plugins?.plugins?.['templater-obsidian']?.templater ?? null;
@@ -286,7 +344,7 @@ class AutoTimestampPlugin extends Plugin {
 }
 
 // ---------- 设置面板 ----------
-class AutoTimestampSettingTab extends PluginSettingTab {
+class QuickStampSettingTab extends PluginSettingTab {
     constructor(app, plugin) { super(app, plugin); this.plugin = plugin; }
 
     display() {
@@ -303,6 +361,7 @@ class AutoTimestampSettingTab extends PluginSettingTab {
 
         new Setting(containerEl)
             .setName('使用模板代替时间戳')
+            .setDesc('开启后通过 Templater 插入并渲染模板。模板始终追加在文章末尾，且另起一行。')
             .addToggle((t) => t.setValue(this.plugin.settings.useTemplate).onChange(async (v) => {
                 this.plugin.settings.useTemplate = v;
                 await this.plugin.saveSettings();
@@ -343,7 +402,7 @@ class AutoTimestampSettingTab extends PluginSettingTab {
 
         new Setting(containerEl)
             .setName('插入位置')
-            .setDesc('点击按钮/命令时使用的位置，不影响"回车自动插入"。')
+            .setDesc('仅用于时间戳插入。模板始终追加在文章末尾。')
             .addDropdown((dd) => dd
                 .addOption('end', '文章最后一行')
                 .addOption('heading', '指定标题')
@@ -389,15 +448,7 @@ class AutoTimestampSettingTab extends PluginSettingTab {
                         await this.plugin.saveSettings();
                     }));
         }
-
-        new Setting(containerEl)
-            .setName('锁定时间戳（仅跳转光标）')
-            .setDesc('开启后插入内容时光标自动跳到该行行尾，降低误编辑概率（稳定基线实现，无视觉样式）。')
-            .addToggle((t) => t.setValue(this.plugin.settings.lockTimestamp).onChange(async (v) => {
-                this.plugin.settings.lockTimestamp = v;
-                await this.plugin.saveSettings();
-            }));
     }
 }
 
-module.exports = AutoTimestampPlugin;
+module.exports = QuickStampPlugin;
